@@ -6,7 +6,7 @@ API REST para gestionar suscripciones de pago al estilo de un banco digital, con
 Premium y Metal. Incluye altas, cambios de plan con prorrateo, cancelación al final del periodo y
 facturación mensual automática e idempotente.
 
-**Stack:** Java 21 · Spring Boot 4.1 · Spring Data JPA · PostgreSQL 16 · Flyway ·
+**Stack:** Java 21 · Spring Boot 4.1 · Spring Data JPA · PostgreSQL 16 · Flyway · ShedLock ·
 Testcontainers · JaCoCo · springdoc-openapi · Docker · GitHub Actions
 
 ## Arrancar
@@ -132,6 +132,22 @@ Los tests destaparon que así un cambio de plan en el mismo instante que otro (o
 alta) chocaba con una factura legítima. Por eso el índice es parcial y solo cubre las facturas
 de periodo.
 
+### Un solo cron aunque haya varias instancias (ShedLock)
+La idempotencia garantiza que nunca se factura dos veces, pero con tres instancias las tres
+recorrerían las mismas suscripciones a las 02:00 y chocarían entre sí. El `@Scheduled` lleva
+`@SchedulerLock`, que usa una fila de la tabla `shedlock` en PostgreSQL como cerrojo: la primera
+instancia que la actualiza ejecuta la renovación y las demás se la saltan.
+
+- `lockAtLeastFor = 1 min` evita que una instancia con el reloj algo retrasado vuelva a lanzarla
+  justo después de terminar la primera. `lockAtMostFor = 30 min` libera el cerrojo si la instancia
+  muere a mitad de la ejecución.
+- La hora la pone PostgreSQL (`usingDbTime()`), no cada máquina.
+- Las columnas son `TIMESTAMP` y no `TIMESTAMPTZ`, como indica ShedLock. Con `TIMESTAMPTZ` un test
+  falló: ShedLock guarda `timezone('utc', now())` y PostgreSQL lo reinterpretaba en la zona de la
+  sesión (Madrid), así que el cerrojo aparecía desplazado dos horas.
+- Hay dos tests: con el cerrojo en manos de "otra instancia" no se renueva nada, y justo después
+  de una ejecución, otra llamada se la salta.
+
 ### Periodos anclados a la fecha de alta
 El fin del periodo *n* se calcula como `started_at + n meses` (columna `billing_cycle`), no
 sumando un mes al fin anterior. Si no, un alta el 31 de enero acabaría facturándose el día 28
@@ -174,7 +190,7 @@ Otros detalles:
 | Tipo | Qué cubre |
 | --- | --- |
 | Unitarios (JUnit 5 + Mockito) | Prorrateo, redondeo, anclaje de periodos y reglas del `SubscriptionService` |
-| Integración (`*IT`, PostgreSQL real) | Flujo HTTP completo, 409 por duplicado, prorrateo, cancelación, renovación, idempotencia con ejecuciones concurrentes, validación y errores JSON |
+| Integración (`*IT`, PostgreSQL real) | Flujo HTTP completo, 409 por duplicado, prorrateo, cancelación, renovación, idempotencia con ejecuciones concurrentes, bloqueo de ShedLock, validación y errores JSON |
 
 - **Base de datos de los tests:** los de integración arrancan PostgreSQL con Testcontainers. En
   una máquina sin Docker se puede usar una base de datos local:
@@ -191,5 +207,3 @@ Otros detalles:
 - **Pagos:** integrar Stripe, con un estado `PAST_DUE` y reintentos cuando falla un cobro.
 - **Seguridad:** Spring Security con JWT, de modo que cada cliente solo vea sus datos.
 - **Despliegue:** AWS (App Runner o ECS + RDS) con las migraciones de Flyway en el arranque.
-- **Scheduler con varias instancias:** ShedLock, para que solo una ejecute el cron. La
-  idempotencia ya evita duplicados, pero así no se hace trabajo de más.

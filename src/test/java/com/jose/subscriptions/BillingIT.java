@@ -132,6 +132,46 @@ class BillingIT extends IntegrationTest {
                 .andExpect(status().isCreated());
     }
 
+    @Test
+    void whileAnotherInstanceHoldsTheLockTheCronDoesNothing() throws Exception {
+        customerWith("PREMIUM");
+        clock.set(Instant.parse("2026-02-01T02:00:00Z"));
+        jdbc.update("""
+                INSERT INTO shedlock (name, lock_until, locked_at, locked_by)
+                VALUES (?, timezone('utc', now()) + interval '10 minutes', timezone('utc', now()), 'otra-instancia')
+                ON CONFLICT (name) DO UPDATE SET lock_until = EXCLUDED.lock_until, locked_by = EXCLUDED.locked_by
+                """, BillingScheduler.LOCK_NAME);
+
+        scheduler.renewDueSubscriptions(); // pasa por el proxy de ShedLock, como el @Scheduled
+
+        assertThat(invoiceCount()).isEqualTo(1); // solo la INITIAL: no se ha renovado nada
+    }
+
+    @Test
+    void theLockIsHeldForAtLeastAMinuteAfterTheRun() throws Exception {
+        clock.set(Instant.parse("2026-01-01T00:00:00Z"));
+        customerWith("PREMIUM", "ana@example.com");
+        clock.set(Instant.parse("2026-02-01T02:00:00Z"));
+
+        scheduler.renewDueSubscriptions();
+        assertThat(invoiceCount()).isEqualTo(2);
+        var heldFor = jdbc.queryForObject(
+                "SELECT extract(epoch FROM lock_until - locked_at) FROM shedlock WHERE name = ?",
+                Double.class, BillingScheduler.LOCK_NAME);
+        assertThat(heldFor).isGreaterThanOrEqualTo(60.0);
+
+        // Otra instancia con el reloj algo retrasado dispara el cron justo después: se lo salta.
+        clock.set(Instant.parse("2026-01-15T00:00:00Z"));
+        customerWith("PREMIUM", "luis@example.com");
+        clock.set(Instant.parse("2026-02-15T02:00:00Z"));
+        scheduler.renewDueSubscriptions();
+        assertThat(invoiceCount()).isEqualTo(3); // la de Luis sigue pendiente
+
+        // runOnce() no pasa por el bloqueo: es lo que usaría una ejecución manual.
+        assertThat(scheduler.runOnce().renewed()).isEqualTo(1);
+        assertThat(invoiceCount()).isEqualTo(4);
+    }
+
     // --- helpers --------------------------------------------------------------------------
 
     private long customerWith(String plan) throws Exception {

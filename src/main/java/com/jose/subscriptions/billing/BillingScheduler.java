@@ -11,6 +11,8 @@ import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
+import net.javacrumbs.shedlock.spring.annotation.SchedulerLock;
+
 import com.jose.subscriptions.billing.BillingService.RenewalOutcome;
 import com.jose.subscriptions.subscription.SubscriptionRepository;
 import com.jose.subscriptions.subscription.SubscriptionStatus;
@@ -21,6 +23,8 @@ import com.jose.subscriptions.subscription.SubscriptionStatus;
  */
 @Component
 public class BillingScheduler {
+
+    public static final String LOCK_NAME = "daily-renewal";
 
     private static final Logger log = LoggerFactory.getLogger(BillingScheduler.class);
 
@@ -34,7 +38,12 @@ public class BillingScheduler {
         this.clock = clock;
     }
 
+    /**
+     * Solo una instancia ejecuta la renovación cada día. lockAtLeastFor evita que otra instancia
+     * con el reloj un poco retrasado vuelva a lanzarla justo después de que termine la primera.
+     */
     @Scheduled(cron = "${billing.renewal-cron}")
+    @SchedulerLock(name = LOCK_NAME, lockAtMostFor = "PT30M", lockAtLeastFor = "PT1M")
     public void renewDueSubscriptions() {
         runOnce();
     }

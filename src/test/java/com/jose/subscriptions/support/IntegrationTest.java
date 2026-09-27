@@ -68,6 +68,9 @@ public abstract class IntegrationTest {
     @BeforeEach
     void resetState() {
         jdbc.execute("TRUNCATE invoices, subscriptions, customers RESTART IDENTITY CASCADE");
+        // Los bloqueos se liberan pero no se borran: ShedLock recuerda qué filas ya insertó y a
+        // partir de ahí solo hace UPDATE, así que borrarlas dejaría la tarea sin poder bloquearse.
+        jdbc.update("UPDATE shedlock SET lock_until = timezone('utc', now()) - interval '1 second'");
         jdbc.update("UPDATE plans SET active = TRUE");
         clock.reset();
     }
